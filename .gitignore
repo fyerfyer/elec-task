@@ -1,0 +1,6 @@
+memory-bank/
+.venv/
+.roo/
+__pycache__/
+.roomodes
+install_rooflow.sh

@@ -1,0 +1,15 @@
+# ELEC9123 Design Task F - UAV Trajectory Simulation Dependencies
+# Core numerical and scientific computing
+numpy>=1.21.0
+matplotlib>=3.5.0
+
+# Reinforcement Learning dependencies for Phase 2
+stable-baselines3>=1.5.0
+gymnasium>=0.26.0
+torch>=1.11.0
+
+# Additional utility packages
+scipy>=1.7.0
+cvxpy>=1.2.0
+
+seaborn
