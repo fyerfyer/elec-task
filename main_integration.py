@@ -59,13 +59,29 @@ class ELEC9123TaskFIntegration:
         # Initialize system parameters
         self.params = SystemParameters()
         
-        # Initialize all components
+        # Initialize all components with GPU acceleration
+        print("🔧 Initializing system components with GPU optimization...")
         self.simulator = UAVTrajectorySimulator(self.params)
-        self.rl_trainer = UAVRLTrainer(self.params, results_dir=os.path.join(self.session_dir, "rl_results"))
-        self.beamforming_optimizer = BeamformingOptimizer(self.params)
+        self.rl_trainer = UAVRLTrainer(
+            self.params,
+            results_dir=os.path.join(self.session_dir, "rl_results"),
+            device="auto",  # Enable smart GPU detection
+            verbose=True
+        )
+        self.beamforming_optimizer = BeamformingOptimizer(
+            self.params,
+            use_gpu=True,  # Enable GPU acceleration
+            verbose=True
+        )
         self.joint_optimizer = JointOptimizer(self.params)
-        self.performance_analyzer = PerformanceAnalyzer(self.params, results_dir=os.path.join(self.session_dir, "performance_results"))
-        self.benchmark_suite = UAVBenchmarkSuite(self.params, results_dir=os.path.join(self.session_dir, "benchmark_results"))
+        self.performance_analyzer = PerformanceAnalyzer(
+            self.params,
+            results_dir=os.path.join(self.session_dir, "performance_results")
+        )
+        self.benchmark_suite = UAVBenchmarkSuite(
+            self.params,
+            results_dir=os.path.join(self.session_dir, "benchmark_results")
+        )
         
         # Results storage
         self.phase_results = {}

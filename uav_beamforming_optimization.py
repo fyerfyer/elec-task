@@ -8,15 +8,88 @@ It includes joint trajectory and beamforming optimization capabilities.
 
 import numpy as np
 import cvxpy as cp
+import torch
 from typing import List, Tuple, Dict, Optional, Any
 from scipy.optimize import minimize, differential_evolution
 import matplotlib.pyplot as plt
+import warnings
 
 from uav_trajectory_simulation import SystemParameters, AntennaArray, ChannelModel
 
+class GPUBeamformingAccelerator:
+    """
+    GPU acceleration utilities for beamforming optimization.
+    """
+    
+    @staticmethod
+    def get_device():
+        """Get optimal device for beamforming computations."""
+        if torch.cuda.is_available():
+            # Suppress CUDA compatibility warnings for beamforming
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    # Test GPU functionality
+                    test = torch.tensor([1.0]).cuda()
+                    del test
+                    torch.cuda.empty_cache()
+                    return torch.device('cuda')
+                except:
+                    pass
+        return torch.device('cpu')
+    
+    @staticmethod
+    def numpy_to_torch(arr: np.ndarray, device: torch.device) -> torch.Tensor:
+        """Convert numpy array to torch tensor on specified device."""
+        if arr.dtype == np.complex128 or arr.dtype == np.complex64:
+            # Handle complex numbers
+            return torch.from_numpy(arr).to(device)
+        return torch.from_numpy(arr.astype(np.float32)).to(device)
+    
+    @staticmethod
+    def accelerated_matrix_mult(A: np.ndarray, B: np.ndarray, use_gpu: bool = True) -> np.ndarray:
+        """
+        GPU-accelerated matrix multiplication for beamforming computations.
+        
+        Args:
+            A: First matrix
+            B: Second matrix
+            use_gpu: Whether to use GPU acceleration
+            
+        Returns:
+            Matrix multiplication result as numpy array
+        """
+        if not use_gpu or not torch.cuda.is_available():
+            return A @ B
+            
+        try:
+            device = torch.device('cuda')
+            
+            # Convert to torch tensors
+            A_torch = GPUBeamformingAccelerator.numpy_to_torch(A, device)
+            B_torch = GPUBeamformingAccelerator.numpy_to_torch(B, device)
+            
+            # Perform multiplication on GPU
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result_torch = torch.matmul(A_torch, B_torch)
+                
+            # Convert back to numpy
+            result_np = result_torch.cpu().numpy()
+            
+            # Clean up GPU memory
+            del A_torch, B_torch, result_torch
+            torch.cuda.empty_cache()
+            
+            return result_np
+            
+        except Exception:
+            # Fallback to CPU
+            return A @ B
+
 class BeamformingOptimizer:
     """
-    Advanced beamforming optimization for UAV communications.
+    Advanced beamforming optimization for UAV communications with GPU acceleration.
     
     Implements multiple beamforming strategies:
     1. Maximum Ratio Transmission (MRT)
@@ -24,10 +97,19 @@ class BeamformingOptimizer:
     3. Minimum Mean Square Error (MMSE)
     4. Sum Rate Maximization
     5. Power-Constrained Optimization
+    
+    Features GPU acceleration for matrix operations when available.
     """
     
-    def __init__(self, params: SystemParameters):
+    def __init__(self, params: SystemParameters, use_gpu: bool = True, verbose: bool = False):
         self.params = params
+        self.use_gpu = use_gpu and torch.cuda.is_available()
+        self.device = GPUBeamformingAccelerator.get_device() if self.use_gpu else torch.device('cpu')
+        self.verbose = verbose
+        
+        if verbose:
+            device_name = "GPU" if self.use_gpu else "CPU"
+            print(f"🔧 BeamformingOptimizer: Using {device_name} acceleration")
         
     def mrt_beamforming(self, channel_vectors: List[np.ndarray]) -> List[np.ndarray]:
         """
@@ -164,15 +246,18 @@ class BeamformingOptimizer:
             
         return beamforming_vectors
         
-    def sum_rate_maximization(self, channel_vectors: List[np.ndarray]) -> List[np.ndarray]:
+    def sum_rate_maximization(self, channel_vectors: List[np.ndarray],
+                             timeout_seconds: float = 10.0, verbose: bool = False) -> List[np.ndarray]:
         """
-        Sum rate maximization using convex optimization.
+        Sum rate maximization using convex optimization with timeout protection.
         
         Solves: maximize Σ log(1 + SINR_k)
         subject to: Σ ||w_k||² ≤ P_T
         
         Args:
             channel_vectors: List of channel vectors h_k for each user
+            timeout_seconds: Maximum time allowed for optimization
+            verbose: Whether to print detailed progress
             
         Returns:
             List of sum-rate optimal beamforming vectors
@@ -180,12 +265,21 @@ class BeamformingOptimizer:
         K = len(channel_vectors)
         N_T = self.params.N_T
         
+        if verbose:
+            print(f"      🔄 Starting sum-rate optimization (K={K}, N_T={N_T})")
+        
+        import time
+        start_time = time.time()
+        
         try:
             # Define optimization variables
             W = cp.Variable((N_T, K), complex=True)  # Beamforming matrix
             
             # Channel matrix
             H = np.array(channel_vectors).conj()  # K x N_T
+            
+            if verbose:
+                print(f"      📊 Setting up optimization variables...")
             
             # Signal powers: |h_k^H * w_k|²
             signal_powers = []
@@ -215,19 +309,66 @@ class BeamformingOptimizer:
             # Power constraint
             power_constraint = cp.sum([cp.sum_squares(W[:, k]) for k in range(K)]) <= self.params.P_T
             
-            # Solve optimization problem
-            problem = cp.Problem(objective, [power_constraint])
-            problem.solve(solver=cp.SCS, verbose=False)
+            if verbose:
+                print(f"      🎯 Solving optimization problem...")
             
-            if problem.status in ["infeasible", "unbounded"]:
+            # Solve optimization problem with timeout protection
+            problem = cp.Problem(objective, [power_constraint])
+            
+            # Try multiple solvers with timeouts
+            solvers_to_try = [
+                (cp.ECOS, {'max_iters': 1000, 'abstol': 1e-6}),
+                (cp.SCS, {'max_iters': 2000, 'eps': 1e-4}),
+                (cp.CVXOPT, {})
+            ]
+            
+            solved = False
+            for solver, solver_options in solvers_to_try:
+                if time.time() - start_time > timeout_seconds:
+                    if verbose:
+                        print(f"      ⏰ Timeout reached ({timeout_seconds}s), falling back to MRT")
+                    break
+                    
+                try:
+                    if verbose:
+                        print(f"      🔧 Trying solver: {solver}")
+                    problem.solve(solver=solver, verbose=False, **solver_options)
+                    
+                    if problem.status in ["optimal", "optimal_inaccurate"]:
+                        solved = True
+                        if verbose:
+                            print(f"      ✅ Solver {solver} succeeded in {time.time() - start_time:.2f}s")
+                        break
+                    elif verbose:
+                        print(f"      ⚠️  Solver {solver} status: {problem.status}")
+                        
+                except Exception as e:
+                    if verbose:
+                        print(f"      ❌ Solver {solver} failed: {str(e)[:50]}...")
+                    continue
+            
+            if not solved or problem.status in ["infeasible", "unbounded"]:
+                if verbose:
+                    print(f"      🔄 All solvers failed, falling back to MRT")
                 # Fallback to MRT
                 return self.mrt_beamforming(channel_vectors)
                 
             # Extract solution
             W_opt = W.value
+            if W_opt is None:
+                if verbose:
+                    print(f"      ⚠️  No solution found, falling back to MRT")
+                return self.mrt_beamforming(channel_vectors)
+                
             beamforming_vectors = [W_opt[:, k] for k in range(K)]
             
-        except Exception:
+            if verbose:
+                total_time = time.time() - start_time
+                print(f"      ✅ Sum-rate optimization completed in {total_time:.2f}s")
+            
+        except Exception as e:
+            if verbose:
+                print(f"      ❌ Sum-rate optimization failed: {str(e)[:50]}..., falling back to MRT")
             # Fallback to MRT if optimization fails
             return self.mrt_beamforming(channel_vectors)
             
@@ -271,7 +412,7 @@ class BeamformingOptimizer:
         elif method == "mmse":
             return self.mmse_beamforming(channel_vectors)
         elif method == "sum_rate":
-            return self.sum_rate_maximization(channel_vectors)
+            return self.sum_rate_maximization(channel_vectors, verbose=False)
         else:
             raise ValueError(f"Unknown beamforming method: {method}")
 
@@ -476,14 +617,15 @@ class JointOptimizer:
             
         return trajectory
 
-def compare_beamforming_methods(params: SystemParameters = None, 
-                              n_scenarios: int = 10) -> Dict[str, Any]:
+def compare_beamforming_methods(params: SystemParameters = None,
+                              n_scenarios: int = 10, verbose: bool = True) -> Dict[str, Any]:
     """
-    Compare different beamforming methods performance.
+    Compare different beamforming methods performance with detailed progress logging.
     
     Args:
         params: System parameters
         n_scenarios: Number of random scenarios to test
+        verbose: Whether to show detailed progress
         
     Returns:
         Comparison results
@@ -495,13 +637,28 @@ def compare_beamforming_methods(params: SystemParameters = None,
     methods = ["mrt", "zf", "mmse", "sum_rate"]
     results = {method: {"throughputs": [], "computation_times": []} for method in methods}
     
+    if verbose:
+        print(f"📡 Testing {len(methods)} beamforming methods across {n_scenarios} scenarios...")
+        print(f"   Methods: {[m.upper() for m in methods]}")
+        print(f"   Users per scenario: {params.K}")
+        
+    import time
+    overall_start_time = time.time()
+    
     for scenario in range(n_scenarios):
+        if verbose:
+            print(f"\n🎯 Scenario {scenario + 1}/{n_scenarios}:")
+            
         # Generate random scenario
         users = []
         for _ in range(params.K):
             x = np.random.uniform(params.X_MIN, params.X_MAX)
             y = np.random.uniform(params.Y_MIN, params.Y_MAX)
             users.append((x, y, 0.0))
+            
+        if verbose:
+            user_positions = ", ".join([f"({u[0]:.1f},{u[1]:.1f})" for u in users])
+            print(f"   👥 Users: {user_positions}")
             
         # Random UAV position
         uav_pos = np.array([
@@ -510,13 +667,18 @@ def compare_beamforming_methods(params: SystemParameters = None,
             params.Z_H
         ])
         
+        if verbose:
+            print(f"   🚁 UAV: ({uav_pos[0]:.1f},{uav_pos[1]:.1f},{uav_pos[2]:.1f})")
+        
         # Compute channel vectors
         channel_vectors = channel_model.compute_channel_vectors(uav_pos, users)
         
         # Test each method
         for method in methods:
-            import time
-            start_time = time.time()
+            method_start_time = time.time()
+            
+            if verbose:
+                print(f"   🔧 Testing {method.upper()}...", end="", flush=True)
             
             try:
                 if method == "mrt":
@@ -526,30 +688,52 @@ def compare_beamforming_methods(params: SystemParameters = None,
                 elif method == "mmse":
                     beamforming_vectors = beamforming_optimizer.mmse_beamforming(channel_vectors)
                 elif method == "sum_rate":
-                    beamforming_vectors = beamforming_optimizer.sum_rate_maximization(channel_vectors)
+                    # Use timeout protection for sum_rate method
+                    beamforming_vectors = beamforming_optimizer.sum_rate_maximization(
+                        channel_vectors, timeout_seconds=5.0, verbose=False
+                    )
                     
-                # Compute throughput
+                # Compute throughput with proper SINR calculation
                 snr_values = []
                 for k in range(params.K):
                     h_k = channel_vectors[k]
                     w_k = beamforming_vectors[k]
                     signal_power = np.abs(np.conj(h_k).T @ w_k)**2
-                    snr = signal_power / params.sigma_2_watts
-                    snr_values.append(snr)
                     
-                throughput = sum(np.log2(1 + snr) for snr in snr_values)
-                computation_time = time.time() - start_time
+                    # Include interference from other users
+                    interference_power = 0.0
+                    for j in range(params.K):
+                        if j != k:
+                            w_j = beamforming_vectors[j]
+                            interference_power += np.abs(np.conj(h_k).T @ w_j)**2
+                    
+                    sinr = signal_power / (interference_power + params.sigma_2_watts)
+                    snr_values.append(sinr)
+                    
+                throughput = sum(np.log2(1 + sinr) for sinr in snr_values)
+                computation_time = time.time() - method_start_time
                 
                 results[method]["throughputs"].append(throughput)
                 results[method]["computation_times"].append(computation_time)
                 
+                if verbose:
+                    print(f" ✅ {computation_time:.3f}s (throughput: {throughput:.2f})")
+                
             except Exception as e:
-                print(f"Method {method} failed in scenario {scenario}: {e}")
+                computation_time = time.time() - method_start_time
+                if verbose:
+                    print(f" ❌ {computation_time:.3f}s (failed: {str(e)[:30]}...)")
+                    
                 # Use fallback values
                 results[method]["throughputs"].append(0.0)
-                results[method]["computation_times"].append(1.0)
+                results[method]["computation_times"].append(computation_time)
                 
     # Compute statistics
+    if verbose:
+        total_time = time.time() - overall_start_time
+        print(f"\n📊 Beamforming Method Comparison Results (Total time: {total_time:.1f}s):")
+        print("-" * 60)
+        
     for method in methods:
         throughputs = results[method]["throughputs"]
         times = results[method]["computation_times"]
@@ -558,6 +742,13 @@ def compare_beamforming_methods(params: SystemParameters = None,
         results[method]["std_throughput"] = np.std(throughputs)
         results[method]["mean_time"] = np.mean(times)
         results[method]["std_time"] = np.std(times)
+        results[method]["success_rate"] = sum(1 for t in throughputs if t > 0) / len(throughputs)
+        
+        if verbose:
+            print(f"{method.upper():<10}: "
+                  f"Throughput: {results[method]['mean_throughput']:.3f} ± {results[method]['std_throughput']:.3f} | "
+                  f"Time: {results[method]['mean_time']:.3f}s ± {results[method]['std_time']:.3f}s | "
+                  f"Success: {results[method]['success_rate']:.1%}")
         
     return results
 

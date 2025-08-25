@@ -14,6 +14,8 @@ from typing import Dict, List, Tuple, Optional, Any, Callable
 import os
 import pickle
 from datetime import datetime
+import warnings
+import psutil
 
 # Stable-baselines3 imports
 from stable_baselines3 import PPO, SAC, DQN
@@ -26,6 +28,105 @@ from stable_baselines3.common.evaluation import evaluate_policy
 
 from uav_rl_environment import UAVTrajectoryOptimizationEnv, create_uav_env
 from uav_trajectory_simulation import SystemParameters
+
+class GPUManager:
+    """
+    Smart GPU detection and management for UAV RL training.
+    Handles device selection, memory optimization, and compatibility issues.
+    """
+    
+    @staticmethod
+    def get_optimal_device(verbose: bool = True) -> str:
+        """
+        Intelligently select the best device for training.
+        
+        Args:
+            verbose: Whether to print device selection details
+            
+        Returns:
+            Device string for Stable-Baselines3 ('cpu', 'cuda', 'cuda:0', etc.)
+        """
+        if verbose:
+            print("🖥️  GPU Manager: Detecting optimal device...")
+            
+        # Check CUDA availability
+        if not torch.cuda.is_available():
+            if verbose:
+                print("   ❌ CUDA not available - using CPU")
+            return "cpu"
+        
+        # Get GPU information
+        gpu_count = torch.cuda.device_count()
+        device_name = torch.cuda.get_device_name(0)
+        memory_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        
+        if verbose:
+            print(f"   ✅ Found GPU: {device_name} ({memory_gb:.1f}GB)")
+            
+        # Check for CUDA capability warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            try:
+                # Try to create a tensor on GPU to trigger warnings
+                test_tensor = torch.tensor([1.0]).cuda()
+                del test_tensor
+                torch.cuda.empty_cache()
+                
+                if w and any("cuda capability" in str(warning.message).lower() for warning in w):
+                    if verbose:
+                        print("   ⚠️  GPU has compatibility warnings but is still usable")
+                        print("   💡 Performance may be reduced, but GPU acceleration will work")
+                else:
+                    if verbose:
+                        print("   ✅ GPU fully compatible")
+                        
+            except Exception as e:
+                if verbose:
+                    print(f"   ❌ GPU test failed: {e} - falling back to CPU")
+                return "cpu"
+        
+        # Memory-based device selection
+        if memory_gb < 2.0:
+            if verbose:
+                print(f"   ⚠️  Low GPU memory ({memory_gb:.1f}GB) - using CPU for safety")
+            return "cpu"
+        elif memory_gb < 6.0:
+            if verbose:
+                print(f"   ✅ Moderate GPU memory ({memory_gb:.1f}GB) - using GPU with optimization")
+            return "cuda"
+        else:
+            if verbose:
+                print(f"   ✅ High GPU memory ({memory_gb:.1f}GB) - using GPU")
+            return "cuda"
+    
+    @staticmethod
+    def optimize_gpu_memory():
+        """Optimize GPU memory usage."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # Set memory fraction for modest GPUs
+            if torch.cuda.get_device_properties(0).total_memory < 6e9:  # < 6GB
+                torch.cuda.set_per_process_memory_fraction(0.8)
+                
+    @staticmethod
+    def get_device_info() -> Dict[str, Any]:
+        """Get comprehensive device information."""
+        info = {
+            'cuda_available': torch.cuda.is_available(),
+            'device_count': torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            'cpu_count': psutil.cpu_count(),
+            'cpu_memory_gb': psutil.virtual_memory().total / 1e9
+        }
+        
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            info.update({
+                'gpu_name': props.name,
+                'gpu_memory_gb': props.total_memory / 1e9,
+                'gpu_compute_capability': f"{props.major}.{props.minor}"
+            })
+            
+        return info
 
 class TrainingMetricsCallback(BaseCallback):
     """
@@ -87,22 +188,39 @@ class UAVRLTrainer:
     """
     Main class for training RL algorithms on UAV trajectory optimization.
     """
-    
-    def __init__(self, 
+    def __init__(self,
                  params: SystemParameters = None,
                  results_dir: str = "rl_results",
-                 device: str = "auto"):
+                 device: str = "auto",
+                 verbose: bool = True):
         """
-        Initialize the RL trainer.
+        Initialize the RL trainer with smart GPU detection.
         
         Args:
             params: System parameters
             results_dir: Directory to save results
-            device: Torch device ("cpu", "cuda", or "auto")
+            device: Device selection ("cpu", "cuda", or "auto" for smart detection)
+            verbose: Whether to show device selection details
         """
         self.params = params or SystemParameters()
         self.results_dir = results_dir
-        self.device = device
+        self.verbose = verbose
+        
+        # Smart device selection
+        if device == "auto":
+            self.device = GPUManager.get_optimal_device(verbose=verbose)
+            GPUManager.optimize_gpu_memory()
+        else:
+            self.device = device
+            if verbose:
+                print(f"🖥️  Using manually specified device: {self.device}")
+        
+        # Store device info for reporting
+        self.device_info = GPUManager.get_device_info()
+        
+        if verbose:
+            self._print_system_info()
+            
         
         # Create results directory
         os.makedirs(self.results_dir, exist_ok=True)
@@ -111,7 +229,68 @@ class UAVRLTrainer:
         self.models = {}
         self.training_metrics = {}
         
-    def create_environment(self, 
+    def _print_system_info(self):
+        """Print comprehensive system information."""
+        print("\n🔧 System Configuration:")
+        print("-" * 40)
+        print(f"   CPU cores: {self.device_info['cpu_count']}")
+        print(f"   System RAM: {self.device_info['cpu_memory_gb']:.1f}GB")
+        
+        if self.device_info['cuda_available']:
+            print(f"   GPU: {self.device_info['gpu_name']}")
+            print(f"   GPU memory: {self.device_info['gpu_memory_gb']:.1f}GB")
+            print(f"   CUDA capability: sm_{self.device_info['gpu_compute_capability'].replace('.', '')}")
+            print(f"   Selected device: {self.device}")
+            if 'cuda' in self.device:
+                print("   🚀 GPU acceleration ENABLED")
+            else:
+                print("   🐌 Using CPU (GPU disabled)")
+        else:
+            print("   GPU: Not available")
+            print("   🐌 Using CPU only")
+        print("-" * 40)
+        
+    def _get_gpu_optimized_config(self, batch_size: int, n_envs: int, device: str) -> Dict[str, Any]:
+        """
+        Get GPU-optimized training configuration based on device and memory.
+        
+        Args:
+            batch_size: Original batch size
+            n_envs: Number of environments
+            device: Device string
+            
+        Returns:
+            Optimized configuration dictionary
+        """
+        if 'cuda' not in device:
+            # CPU optimization - smaller batches
+            return {
+                'batch_size': max(32, batch_size // 2),
+                'n_envs': min(n_envs, 4)
+            }
+        
+        # GPU optimization based on memory
+        gpu_memory_gb = self.device_info.get('gpu_memory_gb', 4.0)
+        
+        if gpu_memory_gb <= 4.0:  # Your GTX 1050 Ti case
+            # Conservative settings for 4GB GPU
+            optimized_batch_size = max(64, min(batch_size, 128))
+            optimized_n_envs = min(n_envs, 8)
+        elif gpu_memory_gb <= 8.0:
+            # Mid-range GPU
+            optimized_batch_size = min(batch_size * 2, 256)
+            optimized_n_envs = min(n_envs * 2, 16)
+        else:
+            # High-end GPU
+            optimized_batch_size = batch_size * 2
+            optimized_n_envs = n_envs * 2
+            
+        return {
+            'batch_size': optimized_batch_size,
+            'n_envs': optimized_n_envs
+        }
+        
+    def create_environment(self,
                           env_id: str = "UAVTrajectoryOpt-v0",
                           n_envs: int = 1,
                           env_kwargs: Dict = None) -> gym.Env:
