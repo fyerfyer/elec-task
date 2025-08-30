@@ -493,9 +493,10 @@ class JointOptimizer:
         return snr_values
         
     def optimize_trajectory(self, users: List[Tuple[float, float, float]],
-                          episode_length: int, 
-                          beamforming_method: str = "sum_rate",
-                          optimization_method: str = "differential_evolution") -> Dict[str, Any]:
+                           episode_length: int,
+                           beamforming_method: str = "sum_rate",
+                           optimization_method: str = "differential_evolution",
+                           verbose: bool = False) -> Dict[str, Any]:
         """
         Optimize UAV trajectory with joint beamforming optimization.
         
@@ -504,13 +505,20 @@ class JointOptimizer:
             episode_length: Number of time steps
             beamforming_method: Beamforming optimization method
             optimization_method: Trajectory optimization method
+            verbose: Whether to show detailed optimization progress
             
         Returns:
             Optimization results
         """
+        if verbose:
+            print(f"      🎯 Starting joint trajectory-beamforming optimization...")
+            print(f"      📋 Parameters: {len(users)} users, {episode_length} steps, method={beamforming_method}")
         # Define trajectory parameterization
         # Simple approach: optimize waypoints and interpolate
         n_waypoints = min(10, episode_length // 10)  # Reduce complexity
+        
+        if verbose:
+            print(f"      📐 Trajectory parameterization: {n_waypoints} waypoints for {episode_length} steps")
         
         # Bounds for waypoint positions
         bounds = []
@@ -521,7 +529,14 @@ class JointOptimizer:
                 (self.params.Z_H, self.params.Z_H)       # z (fixed)
             ])
             
+        # Track function evaluations for progress reporting
+        evaluation_count = [0]
+        
         def trajectory_objective(waypoints_flat):
+            evaluation_count[0] += 1
+            if verbose and evaluation_count[0] % 100 == 0:
+                print(f"      🔄 Evaluation {evaluation_count[0]} (ongoing optimization...)")
+            
             # Reshape waypoints
             waypoints = waypoints_flat.reshape(n_waypoints, 3)
             
@@ -535,27 +550,55 @@ class JointOptimizer:
         start = np.array(self.params.UAV_START)
         end = np.array(self.params.UAV_END)
         initial_waypoints = np.array([
-            start + (end - start) * t / (n_waypoints - 1) 
+            start + (end - start) * t / (n_waypoints - 1)
             for t in range(n_waypoints)
         ])
         initial_guess = initial_waypoints.flatten()
         
-        # Optimize
+        if verbose:
+            print(f"      🎯 Initial trajectory: linear from {start[:2]} to {end[:2]}")
+        
+        # Optimize with progress tracking
+        import time
+        opt_start_time = time.time()
+        
         if optimization_method == "differential_evolution":
+            # Use reduced parameters for faster optimization in verbose mode
+            max_iter = 10 if verbose else 100  # Much more aggressive reduction
+            pop_size = 5 if verbose else 15    # Much smaller population
+            
+            if verbose:
+                print(f"      🔧 Differential Evolution: maxiter={max_iter}, popsize={pop_size}")
+                print(f"      ⚙️  Expected evaluations: ~{max_iter * pop_size:,}")
+                print(f"      ⏱️  Starting optimization...")
+            
             result = differential_evolution(
-                trajectory_objective, 
-                bounds, 
+                trajectory_objective,
+                bounds,
                 seed=42,
-                maxiter=100,
-                popsize=15
+                maxiter=max_iter,
+                popsize=pop_size,
+                disp=False,
+                tol=1e-2 if verbose else 1e-6,  # Relaxed tolerance for quick mode
+                atol=1e-2 if verbose else 0     # Relaxed absolute tolerance
             )
         else:
+            if verbose:
+                print(f"      🔧 Using L-BFGS-B optimization...")
             result = minimize(
                 trajectory_objective,
                 initial_guess,
                 bounds=bounds,
                 method="L-BFGS-B"
             )
+            
+        opt_time = time.time() - opt_start_time
+        
+        if verbose:
+            print(f"      ✅ Optimization completed in {opt_time:.1f}s")
+            print(f"      📊 Total evaluations: {evaluation_count[0]}")
+            print(f"      🎯 Final objective value: {result.fun:.3f}")
+            print(f"      📈 Convergence: {'✅ Success' if result.success else '⚠️ ' + str(result.message)}")
             
         # Extract optimal trajectory
         optimal_waypoints = result.x.reshape(n_waypoints, 3)

@@ -334,7 +334,7 @@ class ELEC9123TaskFIntegration:
             
         return phase_2c_results
         
-    def run_phase_3_performance_analysis(self, verbose: bool = True) -> dict:
+    def run_phase_3_performance_analysis(self, verbose: bool = True, quick_mode: bool = False) -> dict:
         """
         Phase 3: Generate performance analysis and all required plots.
         
@@ -342,6 +342,7 @@ class ELEC9123TaskFIntegration:
         
         Args:
             verbose: Whether to print detailed output
+            quick_mode: If True, uses reduced computational complexity for faster execution
             
         Returns:
             Phase 3 results
@@ -352,8 +353,8 @@ class ELEC9123TaskFIntegration:
             
         start_time = time.time()
         
-        # Generate all required plots
-        figures = self.performance_analyzer.generate_all_plots()
+        # Generate all required plots with quick mode support
+        figures = self.performance_analyzer.generate_all_plots(quick_mode=quick_mode)
         
         execution_time = time.time() - start_time
         
@@ -363,7 +364,8 @@ class ELEC9123TaskFIntegration:
             'execution_time': execution_time,
             'plots_generated': list(figures.keys()),
             'analysis_complete': True,
-            'plots_directory': self.performance_analyzer.results_dir
+            'plots_directory': self.performance_analyzer.results_dir,
+            'quick_mode': quick_mode
         }
         
         self.phase_results['phase_3'] = phase_3_results
@@ -458,7 +460,7 @@ class ELEC9123TaskFIntegration:
             phase_2b_results = {'description': 'Skipped in quick mode'}
             
         phase_2c_results = self.run_phase_2c_beamforming_optimization()
-        phase_3_results = self.run_phase_3_performance_analysis()
+        phase_3_results = self.run_phase_3_performance_analysis(quick_mode=quick_mode)
         
         if not quick_mode:
             phase_4_results = self.run_phase_4_benchmarking()
@@ -599,7 +601,7 @@ def main():
     elif args.phase == 'demo':
         integration.run_complete_system_demo(quick_mode=True)
     elif args.phase == 'analysis':
-        integration.run_phase_3_performance_analysis()
+        integration.run_phase_3_performance_analysis(quick_mode=args.quick)
     elif args.phase == '1':
         integration.run_phase_1_baseline_simulation()
     elif args.phase == '2a':
