@@ -7,6 +7,8 @@ training, evaluation, and convergence tracking capabilities.
 """
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for server environments
 import matplotlib.pyplot as plt
 import torch
 import gymnasium as gym
@@ -810,8 +812,140 @@ class UAVRLTrainer:
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Training curves saved to {save_path}")
+            plt.close(fig)  # Close figure to free memory
+        else:
+            print("Training curves generated (no save path specified)")
+            plt.close(fig)  # Close figure to free memory
+        
+    def plot_algorithm_analysis(self, algorithm: str, save_path: str = None):
+        """
+        Plot detailed analysis for a specific algorithm.
+        
+        Args:
+            algorithm: Algorithm name ('PPO', 'SAC', 'DQN')
+            save_path: Path to save the plot
+        """
+        if algorithm not in self.training_metrics:
+            print(f"⚠️  No training metrics found for {algorithm}")
+            return
             
-        plt.show()
+        try:
+            metrics = self.training_metrics[algorithm]
+            
+            # Create figure with subplots
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            fig.suptitle(f'{algorithm} Training Analysis', fontsize=16)
+            
+            # Plot evaluation rewards
+            if metrics.get('evaluations_timesteps') and metrics.get('evaluations_results'):
+                axes[0, 0].plot(metrics['evaluations_timesteps'], metrics['evaluations_results'], 
+                              'b-', linewidth=2, marker='o', markersize=4)
+                axes[0, 0].set_title('Evaluation Rewards vs Timesteps')
+                axes[0, 0].set_xlabel('Timesteps')
+                axes[0, 0].set_ylabel('Mean Reward')
+                axes[0, 0].grid(True, alpha=0.3)
+                
+                # Add trend line
+                if len(metrics['evaluations_results']) > 1:
+                    z = np.polyfit(metrics['evaluations_timesteps'], metrics['evaluations_results'], 1)
+                    p = np.poly1d(z)
+                    axes[0, 0].plot(metrics['evaluations_timesteps'], p(metrics['evaluations_timesteps']), 
+                                  "r--", alpha=0.8, linewidth=1, label=f'Trend: {z[0]:.2e}x + {z[1]:.2f}')
+                    axes[0, 0].legend()
+            else:
+                axes[0, 0].text(0.5, 0.5, 'No evaluation data available', 
+                              ha='center', va='center', transform=axes[0, 0].transAxes)
+                axes[0, 0].set_title('Evaluation Rewards vs Timesteps')
+            
+            # Plot episode rewards (smoothed)
+            if metrics.get('episode_rewards'):
+                episode_rewards = np.array(metrics['episode_rewards'])
+                episodes = np.arange(len(episode_rewards))
+                
+                # Plot raw rewards with transparency
+                axes[0, 1].plot(episodes, episode_rewards, alpha=0.3, color='lightblue', linewidth=0.5)
+                
+                # Plot smoothed rewards
+                window_size = max(1, len(episode_rewards) // 20)
+                if len(episode_rewards) >= window_size:
+                    smoothed_rewards = np.convolve(episode_rewards, 
+                                                 np.ones(window_size)/window_size, mode='valid')
+                    smooth_episodes = np.arange(len(smoothed_rewards))
+                    axes[0, 1].plot(smooth_episodes, smoothed_rewards, 'b-', linewidth=2, label=f'Smoothed (window={window_size})')
+                    
+                axes[0, 1].set_title('Episode Rewards')
+                axes[0, 1].set_xlabel('Episode')
+                axes[0, 1].set_ylabel('Reward')
+                axes[0, 1].legend()
+                axes[0, 1].grid(True, alpha=0.3)
+            else:
+                axes[0, 1].text(0.5, 0.5, 'No episode reward data available', 
+                              ha='center', va='center', transform=axes[0, 1].transAxes)
+                axes[0, 1].set_title('Episode Rewards')
+                
+            # Plot episode lengths
+            if metrics.get('episode_lengths'):
+                episode_lengths = np.array(metrics['episode_lengths'])
+                episodes = np.arange(len(episode_lengths))
+                
+                axes[1, 0].plot(episodes, episode_lengths, 'g-', linewidth=1, alpha=0.7)
+                
+                # Add moving average
+                window_size = max(1, len(episode_lengths) // 20)
+                if len(episode_lengths) >= window_size:
+                    smoothed_lengths = np.convolve(episode_lengths,
+                                                 np.ones(window_size)/window_size, mode='valid')
+                    smooth_episodes = np.arange(len(smoothed_lengths))
+                    axes[1, 0].plot(smooth_episodes, smoothed_lengths, 'darkgreen', linewidth=2, label=f'Moving Avg (window={window_size})')
+                    axes[1, 0].legend()
+                    
+                axes[1, 0].set_title('Episode Lengths')
+                axes[1, 0].set_xlabel('Episode')
+                axes[1, 0].set_ylabel('Length (steps)')
+                axes[1, 0].grid(True, alpha=0.3)
+            else:
+                axes[1, 0].text(0.5, 0.5, 'No episode length data available', 
+                              ha='center', va='center', transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Episode Lengths')
+                
+            # Plot episode throughputs
+            if metrics.get('episode_throughputs'):
+                episode_throughputs = np.array(metrics['episode_throughputs'])
+                episodes = np.arange(len(episode_throughputs))
+                
+                axes[1, 1].plot(episodes, episode_throughputs, 'orange', linewidth=1, alpha=0.7)
+                
+                # Add moving average
+                window_size = max(1, len(episode_throughputs) // 20)
+                if len(episode_throughputs) >= window_size:
+                    smoothed_throughputs = np.convolve(episode_throughputs,
+                                                     np.ones(window_size)/window_size, mode='valid')
+                    smooth_episodes = np.arange(len(smoothed_throughputs))
+                    axes[1, 1].plot(smooth_episodes, smoothed_throughputs, 'darkorange', linewidth=2, label=f'Moving Avg (window={window_size})')
+                    axes[1, 1].legend()
+                    
+                axes[1, 1].set_title('Episode Throughputs')
+                axes[1, 1].set_xlabel('Episode')
+                axes[1, 1].set_ylabel('Sum Throughput (bps)')
+                axes[1, 1].grid(True, alpha=0.3)
+            else:
+                axes[1, 1].text(0.5, 0.5, 'No episode throughput data available', 
+                              ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Episode Throughputs')
+                
+            plt.tight_layout()
+            
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                print(f"📊 {algorithm} analysis plot saved to {save_path}")
+                plt.close(fig)  # Close figure to free memory
+            else:
+                print(f"📊 {algorithm} analysis plot generated (no save path specified)")
+                plt.close(fig)  # Close figure to free memory
+                
+        except Exception as e:
+            print(f"⚠️  Error generating {algorithm} analysis plot: {e}")
+            print(f"💡 This is usually not critical - training data may be incomplete")
 
 def main():
     """Main training execution"""
