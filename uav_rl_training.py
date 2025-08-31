@@ -206,6 +206,9 @@ class UAVRLTrainer:
         self.results_dir = results_dir
         self.verbose = verbose
         
+        # Check TensorBoard availability
+        self.tensorboard_available = self._check_tensorboard()
+        
         # Smart device selection
         if device == "auto":
             self.device = GPUManager.get_optimal_device(verbose=verbose)
@@ -222,12 +225,28 @@ class UAVRLTrainer:
             self._print_system_info()
             
         
-        # Create results directory
+        # Create results directory and tensorboard subdirectory
         os.makedirs(self.results_dir, exist_ok=True)
+        if self.tensorboard_available:
+            os.makedirs(f"{self.results_dir}/tensorboard", exist_ok=True)
         
         # Store trained models and metrics
         self.models = {}
         self.training_metrics = {}
+        
+    def _check_tensorboard(self):
+        """Check if TensorBoard is available"""
+        try:
+            import tensorboard  # noqa: F401
+            from torch.utils.tensorboard import SummaryWriter  # noqa: F401
+            if self.verbose:
+                print("✅ TensorBoard available for logging")
+            return True
+        except ImportError:
+            if self.verbose:
+                print("⚠️  TensorBoard not available - logging will be disabled")
+                print("💡 Install with: pip install tensorboard")
+            return False
         
     def _print_system_info(self):
         """Print comprehensive system information."""
@@ -307,12 +326,17 @@ class UAVRLTrainer:
         """
         env_kwargs = env_kwargs or {}
         
+        # Extract action_space_type from env_kwargs to avoid duplication
+        # Make a copy to avoid modifying the original dict
+        env_kwargs_copy = env_kwargs.copy()
+        action_space_type = env_kwargs_copy.pop("action_space_type", "continuous")
+        
         def _make_env():
             env = create_uav_env(
                 params=self.params,
-                action_space_type="continuous",
+                action_space_type=action_space_type,
                 max_episode_steps=300,
-                **env_kwargs
+                **env_kwargs_copy
             )
             env = Monitor(env)
             return env
@@ -361,25 +385,30 @@ class UAVRLTrainer:
         # Create environments
         train_env = self.create_environment(n_envs=n_envs)
         eval_env = self.create_environment(n_envs=1)
+
+        # Create PPO model with conditional TensorBoard logging
+        model_kwargs = {
+            "policy": "MlpPolicy",
+            "env": train_env,
+            "learning_rate": learning_rate,
+            "n_steps": n_steps,
+            "batch_size": batch_size,
+            "n_epochs": n_epochs,
+            "gamma": gamma,
+            "gae_lambda": gae_lambda,
+            "clip_range": clip_range,
+            "ent_coef": ent_coef,
+            "vf_coef": vf_coef,
+            "max_grad_norm": max_grad_norm,
+            "verbose": 1,
+            "device": self.device  # Use GPU as requested
+        }
         
-        # Create PPO model
-        model = PPO(
-            "MlpPolicy",
-            train_env,
-            learning_rate=learning_rate,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            n_epochs=n_epochs,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-            clip_range=clip_range,
-            ent_coef=ent_coef,
-            vf_coef=vf_coef,
-            max_grad_norm=max_grad_norm,
-            verbose=1,
-            device=self.device,
-            tensorboard_log=f"{self.results_dir}/tensorboard/"
-        )
+        # Add TensorBoard logging only if available
+        if self.tensorboard_available:
+            model_kwargs["tensorboard_log"] = f"{self.results_dir}/tensorboard/"
+        
+        model = PPO(**model_kwargs)
         
         # Setup callbacks
         metrics_callback = TrainingMetricsCallback(
@@ -454,24 +483,29 @@ class UAVRLTrainer:
         train_env = self.create_environment(n_envs=1)
         eval_env = self.create_environment(n_envs=1)
         
-        # Create SAC model
-        model = SAC(
-            "MlpPolicy",
-            train_env,
-            learning_rate=learning_rate,
-            buffer_size=buffer_size,
-            learning_starts=learning_starts,
-            batch_size=batch_size,
-            tau=tau,
-            gamma=gamma,
-            train_freq=train_freq,
-            gradient_steps=gradient_steps,
-            ent_coef=ent_coef,
-            target_update_interval=target_update_interval,
-            verbose=1,
-            device=self.device,
-            tensorboard_log=f"{self.results_dir}/tensorboard/"
-        )
+        # Create SAC model with conditional TensorBoard logging
+        model_kwargs = {
+            "policy": "MlpPolicy",
+            "env": train_env,
+            "learning_rate": learning_rate,
+            "buffer_size": buffer_size,
+            "learning_starts": learning_starts,
+            "batch_size": batch_size,
+            "tau": tau,
+            "gamma": gamma,
+            "train_freq": train_freq,
+            "gradient_steps": gradient_steps,
+            "ent_coef": ent_coef,
+            "target_update_interval": target_update_interval,
+            "verbose": 1,
+            "device": self.device
+        }
+        
+        # Add TensorBoard logging only if available
+        if self.tensorboard_available:
+            model_kwargs["tensorboard_log"] = f"{self.results_dir}/tensorboard/"
+        
+        model = SAC(**model_kwargs)
         
         # Setup callbacks
         metrics_callback = TrainingMetricsCallback(
@@ -557,26 +591,31 @@ class UAVRLTrainer:
             env_kwargs={"action_space_type": "discrete"}
         )
         
-        # Create DQN model
-        model = DQN(
-            "MlpPolicy",
-            train_env,
-            learning_rate=learning_rate,
-            buffer_size=buffer_size,
-            learning_starts=learning_starts,
-            batch_size=batch_size,
-            tau=tau,
-            gamma=gamma,
-            train_freq=train_freq,
-            gradient_steps=gradient_steps,
-            target_update_interval=target_update_interval,
-            exploration_fraction=exploration_fraction,
-            exploration_initial_eps=exploration_initial_eps,
-            exploration_final_eps=exploration_final_eps,
-            verbose=1,
-            device=self.device,
-            tensorboard_log=f"{self.results_dir}/tensorboard/"
-        )
+        # Create DQN model with conditional TensorBoard logging
+        model_kwargs = {
+            "policy": "MlpPolicy",
+            "env": train_env,
+            "learning_rate": learning_rate,
+            "buffer_size": buffer_size,
+            "learning_starts": learning_starts,
+            "batch_size": batch_size,
+            "tau": tau,
+            "gamma": gamma,
+            "train_freq": train_freq,
+            "gradient_steps": gradient_steps,
+            "target_update_interval": target_update_interval,
+            "exploration_fraction": exploration_fraction,
+            "exploration_initial_eps": exploration_initial_eps,
+            "exploration_final_eps": exploration_final_eps,
+            "verbose": 1,
+            "device": self.device
+        }
+        
+        # Add TensorBoard logging only if available
+        if self.tensorboard_available:
+            model_kwargs["tensorboard_log"] = f"{self.results_dir}/tensorboard/"
+        
+        model = DQN(**model_kwargs)
         
         # Setup callbacks
         metrics_callback = TrainingMetricsCallback(
