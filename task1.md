@@ -1,0 +1,3 @@
+我当前正在完成ELEC9123_Design_Task_F_T2_2025_AIT.md中的任务，现在我希望你根据这个Markdown任务文档的内容，以及memory-bank中的内容和当前的完成状态IMPLEMENTATION_STATUS.md文档，帮我完成剩下的部分。
+
+注意，你每完成一个小部分就应该运行一下代码，看看实现的是否有问题，如果返回的日志有error之类的话就解决问题再接着实现新的。同时在完成这些任务后，你应该更新README.md文档和memory-bank的内容。
